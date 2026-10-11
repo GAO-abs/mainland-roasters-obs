@@ -1,0 +1,73 @@
+name: Deploy to Huawei Cloud OBS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# id-token: write lets the job request a GitHub OIDC token.
+# It grants no write access to the repository.
+permissions:
+  id-token: write
+  contents: read
+
+# Never run two deployments at once; a newer push waits for the current one.
+concurrency:
+  group: deploy-obs
+  cancel-in-progress: false
+
+env:
+  HW_REGION: ${{ vars.HW_REGION }}          # e.g. af-south-1
+  OBS_BUCKET: ${{ vars.OBS_BUCKET }}        # bucket that hosts the site
+  HW_AGENCY: ${{ vars.HW_AGENCY || 'github-actions' }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Build the site
+        run: npm run build
+
+      - name: Log in to Huawei Cloud with OIDC
+        uses: GAO-abs/huaweicloud-oidc-login@main
+        with:
+          account-id: ${{ vars.HW_ACCOUNT_ID }}
+          agency-name: ${{ env.HW_AGENCY }}
+          region: ${{ env.HW_REGION }}
+
+      - name: Install obsutil
+        run: |
+          curl -sSL -o obsutil.tar.gz \
+            https://obs-community-intl.obs.ap-southeast-1.myhuaweicloud.com/obsutil/current/obsutil_linux_amd64.tar.gz
+          mkdir -p "$RUNNER_TEMP/obsutil"
+          tar -xzf obsutil.tar.gz -C "$RUNNER_TEMP/obsutil" --strip-components=1
+          chmod 755 "$RUNNER_TEMP/obsutil/obsutil"
+          echo "$RUNNER_TEMP/obsutil" >> "$GITHUB_PATH"
+
+      - name: Upload the build to OBS
+        run: |
+          if [ -z "$OBS_BUCKET" ] || [ -z "$HW_REGION" ]; then
+            echo "::error::Set the OBS_BUCKET and HW_REGION repository variables."; exit 1
+          fi
+          # The temporary AK/SK only work together with the security token (-t).
+          obsutil config \
+            -i="$HW_ACCESS_KEY" \
+            -k="$HW_SECRET_KEY" \
+            -t="$HW_SECURITY_TOKEN" \
+            -e="https://obs.${HW_REGION}.myhuaweicloud.com" > /dev/null
+          obsutil sync ./dist "obs://${OBS_BUCKET}"
+
+      - name: Remove the stored credentials
+        if: always()
+        run: rm -f ~/.obsutilconfig
